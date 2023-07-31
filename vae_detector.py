@@ -77,15 +77,27 @@ def collate_fn(examples):
 class VAEDetector(nn.Module):
     def __init__(self, conv_chs=64, linear_chs=16):
         super().__init__()
-        self.conv_in = nn.Conv2d(3, conv_chs, 9, padding="same")
+        self.patches = 8
+        self.conv_in = nn.Conv2d(3, conv_chs, 9, padding="valid")
         self.linear1 = nn.Linear(conv_chs, linear_chs)
         self.linear2 = nn.Linear(linear_chs, 1)
+        self.linear3 = nn.Linear(3, 1)
 
     def forward(self, x):
         z = self.conv_in(x)
+        kernel_size_w = z.shape[2] // self.patches
+        kernel_size_h = z.shape[3] // self.patches
+        z = z.unfold(3, kernel_size_h, kernel_size_h).unfold(2, kernel_size_w, kernel_size_w)
         z = torch.max(torch.max(z, -1)[0], -1)[0]
+        z = z.view(*z.shape[:-2], -1)
+        z = torch.transpose(z, 1, 2)
         z = F.relu(self.linear1(z))
-        z = F.sigmoid(self.linear2(z))
+        z = self.linear2(z)
+        m1 = torch.mean(z, 1)
+        m2 = torch.max(z, 1)[0]
+        m3 = torch.sqrt(torch.mean(torch.square(z), 1))
+        y = torch.cat([m1, m2, m3], -1)
+        z = F.sigmoid(self.linear3(y))
         return z
 
 def get_loss(model, images, targets):
