@@ -11,18 +11,7 @@ from torchvision import transforms
 import random
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
-
-device = "cuda"
-steps = 20000
-
-if 1:
-    validation_vae_path = "validation/sdxl10"
-    vae_path = "test/sdxl10"
-else:
-    validation_vae_path = "validation/sdxl09"
-    vae_path = "test/sdxl09"
-reg_path = "test/orig"
-validation_reg_path = "validation/orig"
+import argparse
 
 class VAEDataset(Dataset):
     def __init__(
@@ -101,40 +90,108 @@ class VAEDetector(nn.Module):
 
 def get_loss(model, images, targets):
     pred = detector(images)
-    loss = F.mse_loss(pred, targets)
-    # This is probably more correct
-    #loss = F.binary_cross_entropy(pred, targets)
+    loss = F.binary_cross_entropy(pred, targets)
     with torch.no_grad():
         correct = torch.sum(torch.round(pred) == targets) / targets.shape[0]
     return loss, correct
 
 if __name__ == "__main__":
-    detector = VAEDetector().to(device)
-    dataset = VAEDataset(vae_path, reg_path)
+    parser = argparse.ArgumentParser(description="VAE artifact detector trainer.")
+    parser.add_argument(
+        "--train_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Training data path for VAE processed images",
+    )
+    parser.add_argument(
+        "--reg_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Training data path for non processed images",
+    )
+    parser.add_argument(
+        "--validation_path",
+        type=str,
+        default=None,
+        required=False,
+        help="Validation data path for VAE processed images",
+    )
+    parser.add_argument(
+        "--validation_reg_path",
+        type=str,
+        default=None,
+        required=False,
+        help="Validation data path for non processed images",
+    )
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default="sdxl_vae_detector.pt",
+        required=False,
+        help="Output filename",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=20000,
+        help="Number of steps to train",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=12,
+        help="CPU workers",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Device to use",
+    )
+    args = parser.parse_args()
+    detector = VAEDetector().to(args.device)
+    dataset = VAEDataset(args.train_path, args.reg_path)
     dataloader = DataLoader(dataset,
-            batch_size=64,
+            batch_size=args.batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=12)
-    validation_dataset = VAEDataset(validation_vae_path, validation_reg_path)
-    optimizer = torch.optim.AdamW(detector.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=steps//2.2, gamma=0.1)
+            num_workers=args.num_workers)
+    if args.validation_path is not None:
+        validation_dataset = VAEDataset(args.validation_path, args.validation_reg_path)
+    else:
+        validation_dataset = None
+    optimizer = torch.optim.AdamW(detector.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.steps//2.2, gamma=0.1)
     params = 0
     for p in detector.parameters():
         params += p.numel()
     print(params, 'Parameters')
-    writer = SummaryWriter(comment=vae_path.split('/')[-1])
+    writer = SummaryWriter(comment=args.train_path.split('/')[-1])
     detector.train()
     epoch = 0
     step = 0
-    progress_bar = tqdm(range(steps))
+    progress_bar = tqdm(range(args.steps))
     progress_bar.set_description("Steps")
-    while step < steps:
+    while step < args.steps:
         epoch += 1
         for batch in dataloader:
             step += 1
-            targets = batch["targets"].to(device)
-            images = batch["pixel_values"].to(device)
+            targets = batch["targets"].to(args.device)
+            images = batch["pixel_values"].to(args.device)
             loss, correct = get_loss(detector, images, targets)
             l = loss.detach().cpu().item()
             c = correct.detach().cpu().item()
@@ -146,30 +203,31 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             progress_bar.update(1)
             scheduler.step()
-            if step >= steps:
+            if step >= args.steps:
                 break
 
-    torch.save(detector.state_dict(), 'sdxl_vae_detector.pt')
+    torch.save(detector.state_dict(), args.output_filename)
     print('Model saved')
-    validation_dataloader = DataLoader(validation_dataset,
-            batch_size=64,
-            shuffle=True,
-            collate_fn=collate_fn,
-            num_workers=12)
-    losses = []
-    corrects = []
-    print('Running validation')
-    with torch.inference_mode():
-        for batch in validation_dataloader:
-            targets = batch["targets"].to(device)
-            images = batch["pixel_values"].to(device)
-            loss, correct = get_loss(detector, images, targets)
-            l = loss.detach().cpu().item()
-            c = correct.detach().cpu().item()
-            losses.append(l)
-            corrects.append(c)
-    l = sum(losses) / len(losses)
-    c = sum(corrects) / len(corrects)
-    print('Validation loss', l, 'correct', c)
-    writer.add_scalar('Loss/validation', l, step)
-    writer.add_scalar('Accuracy/validation', c, step)
+    if validation_dataset is not None:
+        validation_dataloader = DataLoader(validation_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=args.num_workers)
+        losses = []
+        corrects = []
+        print('Running validation')
+        with torch.inference_mode():
+            for batch in validation_dataloader:
+                targets = batch["targets"].to(args.device)
+                images = batch["pixel_values"].to(args.device)
+                loss, correct = get_loss(detector, images, targets)
+                l = loss.detach().cpu().item()
+                c = correct.detach().cpu().item()
+                losses.append(l)
+                corrects.append(c)
+        l = sum(losses) / len(losses)
+        c = sum(corrects) / len(corrects)
+        print('Validation loss', l, 'correct', c)
+        writer.add_scalar('Loss/validation', l, step)
+        writer.add_scalar('Accuracy/validation', c, step)
