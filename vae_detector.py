@@ -75,29 +75,37 @@ def collate_fn(examples):
     return batch
 
 class VAEDetector(nn.Module):
-    def __init__(self, conv_chs=64, linear_chs=16):
+    def __init__(self, conv_chs=64, linear_chs=16, linear2_chs=8):
         super().__init__()
         self.patches = 8
         self.conv_in = nn.Conv2d(3, conv_chs, 9, padding="valid")
         self.linear1 = nn.Linear(conv_chs, linear_chs)
         self.linear2 = nn.Linear(linear_chs, 1)
-        self.linear3 = nn.Linear(3, 1)
+        self.linear3 = nn.Linear(4, linear2_chs)
+        self.linear4 = nn.Linear(linear2_chs, 1)
 
-    def forward(self, x):
-        z = self.conv_in(x)
+    def forward(self, z):
+        z = self.conv_in(z)
+        # Split conv output into patches.
         kernel_size_w = z.shape[2] // self.patches
         kernel_size_h = z.shape[3] // self.patches
         z = z.unfold(3, kernel_size_h, kernel_size_h).unfold(2, kernel_size_w, kernel_size_w)
+        # Max of every patch.
         z = torch.max(torch.max(z, -1)[0], -1)[0]
         z = z.view(*z.shape[:-2], -1)
         z = torch.transpose(z, 1, 2)
+        # Apply same linear net to every patch.
         z = F.relu(self.linear1(z))
         z = self.linear2(z)
+        # Calculate mean, max, min and RMS of patches.
         m1 = torch.mean(z, 1)
         m2 = torch.max(z, 1)[0]
-        m3 = torch.sqrt(torch.mean(torch.square(z), 1))
-        y = torch.cat([m1, m2, m3], -1)
-        z = F.sigmoid(self.linear3(y))
+        m3 = torch.min(z, 1)[0]
+        m4 = torch.sqrt(torch.mean(torch.square(z), 1))
+        # Linear net to calculate prediction from previous stats.
+        z = torch.cat([m1, m2, m3, m4], -1)
+        z = F.relu(self.linear3(z))
+        z = F.sigmoid(self.linear4(z))
         return z
 
 def get_loss(model, images, targets):
